@@ -16,7 +16,7 @@ This repository has structured issue templates. You MUST use the appropriate tem
 
 ## Steps
 
-1. **Determine the issue type** from `$@`:
+1. **Determine the issue type** from the user input: $@
    - Bug → use `--template bug_report`
    - Feature → use `--template feature_request`  
    - Documentation → use `--template documentation`

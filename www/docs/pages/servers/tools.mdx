@@ -215,6 +215,27 @@ func searchProductsHandler(ctx context.Context, req mcp.CallToolRequest, args Se
 }
 ```
 
+### Validating Output Against the Schema
+
+Declaring an output schema is a contract: clients can rely on the shape of
+`structuredContent` matching the schema you advertised. To enforce that
+contract at runtime, opt in to output schema validation when constructing
+the server:
+
+```go
+s := server.NewMCPServer("Product Search", "1.0.0",
+    server.WithToolCapabilities(false),
+    server.WithOutputSchemaValidation(), // reject results that don't match outputSchema
+)
+```
+
+When enabled, every tool result whose `StructuredContent` does not conform
+to the declared `outputSchema` is replaced with a tool execution error
+(`IsError: true`). This catches handler bugs server-side instead of letting
+them reach the client as a silent protocol violation. Tools without an
+output schema, results without `StructuredContent`, and error results are
+all passed through unchanged.
+
 ### Array Output Schema
 
 Tools can return arrays of structured data:
@@ -245,6 +266,69 @@ func listAssetsHandler(ctx context.Context, req mcp.CallToolRequest, args struct
     }, nil
 }
 ```
+
+### Caching Schemas for Stateless / Serverless Deployments
+
+Generating JSON schemas with `WithInputSchema[T]()` and `WithOutputSchema[T]()`
+uses reflection at server start-up. In long-running servers this is a one-time
+cost, but in serverless environments (AWS Lambda, Cloud Functions, Cloud Run
+with scale-to-zero) the server is reconstructed on every cold start and the
+reflection cost is paid again and again.
+
+Use `mcp.SchemaCache` to pre-compute schemas at build time, persist them to
+disk, and reload them at start-up:
+
+```go
+// build/warm-cache.go — run as part of your build pipeline
+func main() {
+    cache := mcp.NewSchemaCache()
+    if err := mcp.WarmFor[WeatherRequest](cache); err != nil {
+        log.Fatal(err)
+    }
+    if err := mcp.WarmFor[WeatherResponse](cache); err != nil {
+        log.Fatal(err)
+    }
+    if err := cache.Save("schemas.json"); err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
+At runtime, load the cache once and pass it to the cache-aware tool options.
+On a cache hit the schema is served straight from memory; on a miss the cache
+falls back to reflection and stores the result for next time, so the same
+code works locally without a pre-built cache file:
+
+```go
+var cache = func() *mcp.SchemaCache {
+    c, err := mcp.LoadSchemaCache("schemas.json")
+    if err != nil {
+        return mcp.NewSchemaCache() // fall back to live reflection
+    }
+    return c
+}()
+
+weatherTool := mcp.NewTool("get_weather",
+    mcp.WithDescription("Get current weather"),
+    mcp.WithCachedInputSchema[WeatherRequest](cache),
+    mcp.WithCachedOutputSchema[WeatherResponse](cache),
+)
+```
+
+The cache key defaults to the package-qualified Go type name
+(e.g. `main.WeatherRequest`). If you need a stable key that survives renames
+or package moves, use the explicit-key variants:
+
+```go
+if err := mcp.WarmFor[WeatherRequest](cache, "weather.v1.input"); err != nil {
+    log.Fatal(err)
+}
+
+mcp.WithCachedInputSchemaKey[WeatherRequest](cache, "weather.v1.input")
+```
+
+`SchemaCache` is safe for concurrent use, marshals to deterministic JSON
+(sorted keys), and writes via an atomic temp-file-and-rename in `Save`.
 
 ### Schema Tags Reference
 

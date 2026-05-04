@@ -16,7 +16,7 @@ This prompt uses the `feature_request` GitHub template which requires:
 
 ## Steps
 
-1. **Understand the request** from `$@`
+1. **Understand the request** from the user input: $@
    - What capability is missing?
    - What would the ideal behavior look like?
 

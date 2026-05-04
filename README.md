@@ -95,6 +95,7 @@ MCP Go handles all the complex protocol details and server management, so you ca
 - [Examples](#examples)
 - [Extras](#extras)
   - [Transports](#transports)
+  - [OAuth Protected Resource Metadata](#oauth-protected-resource-metadata)
   - [Session Management](#session-management)
     - [Basic Session Handling](#basic-session-handling)
     - [Per-Session Tools](#per-session-tools)
@@ -655,6 +656,55 @@ Key examples include:
 ### Transports
 
 MCP-Go supports stdio, SSE and streamable-HTTP transport layers. For SSE transport, you can use `SetConnectionLostHandler()` to detect and handle disconnections for implementing reconnection logic.
+
+### OAuth Protected Resource Metadata
+
+Servers that require OAuth can advertise their authorization requirements
+via the [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728)
+`/.well-known/oauth-protected-resource` endpoint referenced by the
+[MCP authorization spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization).
+Use `server.WithProtectedResourceMetadata` (or
+`server.WithSSEProtectedResourceMetadata`) to auto-mount the endpoint, or
+`server.NewProtectedResourceMetadataHandler` to wire it into a custom router.
+See the [HTTP transport docs](https://mcp-go.dev/transports/http#oauth-protected-resource-metadata-rfc-9728) for examples.
+
+```go
+httpServer := server.NewStreamableHTTPServer(mcpServer,
+    server.WithProtectedResourceMetadata(server.ProtectedResourceMetadataConfig{
+        Resource:             "https://my-mcp-server.com",
+        AuthorizationServers: []string{"https://auth.example.com"},
+        ScopesSupported:      []string{"mcp:read", "mcp:write"},
+    }),
+)
+```
+
+### CORS for browser-based clients
+
+Servers exposed to browser-based MCP clients can opt into Cross-Origin
+Resource Sharing handling on either HTTP transport. CORS is disabled by
+default; configure it explicitly via `server.WithStreamableHTTPCORS` or
+`server.WithSSECORS`:
+
+```go
+httpServer := server.NewStreamableHTTPServer(mcpServer,
+    server.WithEndpointPath("/mcp"),
+    server.WithStreamableHTTPCORS(
+        server.WithCORSAllowedOrigins("https://my-ai-app.com", "http://localhost:3000"),
+        server.WithCORSAllowCredentials(),
+        server.WithCORSMaxAge(300),
+    ),
+)
+```
+
+The transport answers preflight (`OPTIONS`) requests directly and decorates
+simple responses with the appropriate `Access-Control-Allow-Origin`,
+`Access-Control-Allow-Credentials`, `Access-Control-Expose-Headers` and
+`Vary` headers. Sensible defaults are used when the corresponding option is
+omitted (`GET, POST, DELETE, OPTIONS` for methods; `Content-Type,
+Mcp-Session-Id, Last-Event-ID, Authorization` for request headers;
+`Mcp-Session-Id` for exposed headers). Combining `WithCORSAllowedOrigins("*")`
+with `WithCORSAllowCredentials()` echoes the request `Origin` to remain
+spec-compliant.
 
 ### Session Management
 

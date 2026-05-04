@@ -145,6 +145,23 @@ func WithTLSCert(certFile, keyFile string) StreamableHTTPOption {
 	}
 }
 
+// WithProtectedResourceMetadata configures the StreamableHTTPServer to serve
+// OAuth 2.0 Protected Resource Metadata (RFC 9728) at the well-known endpoint
+// derived from the configured Resource (see ProtectedResourceMetadataPath).
+//
+// The metadata is served both when the server is started via Start (registered
+// on the internal mux) and when the server is used directly as an
+// http.Handler via ServeHTTP. To mount the metadata endpoint manually on a
+// custom router, use NewProtectedResourceMetadataHandler instead.
+func WithProtectedResourceMetadata(config ProtectedResourceMetadataConfig) StreamableHTTPOption {
+	return func(s *StreamableHTTPServer) {
+		cfg := config
+		s.protectedResourceMetadata = &cfg
+		s.protectedResourceMetadataPath = ProtectedResourceMetadataPath(cfg.Resource)
+		s.protectedResourceMetadataHandler = NewProtectedResourceMetadataHandler(cfg)
+	}
+}
+
 // WithSessionIdleTTL sets the idle TTL for per-session transport state.
 // When enabled, a background sweeper periodically removes entries from
 // per-session stores (tools, resources, resource templates, log levels,
@@ -155,6 +172,37 @@ func WithTLSCert(certFile, keyFile string) StreamableHTTPOption {
 func WithSessionIdleTTL(ttl time.Duration) StreamableHTTPOption {
 	return func(s *StreamableHTTPServer) {
 		s.sessionIdleTTL = ttl
+	}
+}
+
+// WithStreamableHTTPCORS configures Cross-Origin Resource Sharing for the
+// Streamable HTTP server.
+//
+// CORS handling is opt-in: callers must specify at least one allowed origin
+// via WithCORSAllowedOrigins for any Access-Control-* headers to be emitted.
+// When enabled, preflight (OPTIONS) requests are answered directly by the
+// server and simple cross-origin responses are decorated with the configured
+// Allow-Origin, Allow-Credentials, Expose-Headers and Vary headers.
+//
+// Example:
+//
+//	srv := server.NewStreamableHTTPServer(mcpServer,
+//	    server.WithEndpointPath("/mcp"),
+//	    server.WithStreamableHTTPCORS(
+//	        server.WithCORSAllowedOrigins("https://my-ai-app.com"),
+//	        server.WithCORSAllowCredentials(),
+//	    ),
+//	)
+func WithStreamableHTTPCORS(opts ...CORSOption) StreamableHTTPOption {
+	return func(s *StreamableHTTPServer) {
+		if s.corsConfig == nil {
+			s.corsConfig = &CORSConfig{}
+		}
+		for _, opt := range opts {
+			if opt != nil {
+				opt(s.corsConfig)
+			}
+		}
 	}
 }
 
@@ -207,6 +255,18 @@ type StreamableHTTPServer struct {
 	sessionIdleTTL    time.Duration
 	sessionLastActive sync.Map // sessionID → *atomic.Int64 (unix nanos)
 	sweeperCancel     context.CancelFunc
+
+	// protectedResourceMetadata, when non-nil, is served as RFC 9728 OAuth
+	// 2.0 Protected Resource Metadata. The well-known path is derived from
+	// the configured Resource via ProtectedResourceMetadataPath.
+	protectedResourceMetadata        *ProtectedResourceMetadataConfig
+	protectedResourceMetadataPath    string
+	protectedResourceMetadataHandler http.Handler
+
+	// corsConfig, when non-nil and with at least one allowed origin, makes
+	// the server emit CORS headers and answer preflight requests. See
+	// WithStreamableHTTPCORS.
+	corsConfig *CORSConfig
 }
 
 // NewStreamableHTTPServer creates a new streamable-http server instance
@@ -244,7 +304,27 @@ func NewStreamableHTTPServer(server *MCPServer, opts ...StreamableHTTPOption) *S
 }
 
 // ServeHTTP implements the http.Handler interface.
+//
+// When WithProtectedResourceMetadata has been configured, requests to the
+// derived /.well-known/oauth-protected-resource path are dispatched to the
+// metadata handler so that the same StreamableHTTPServer can be mounted as a
+// single http.Handler while still exposing OAuth discovery metadata.
+//
+// When WithStreamableHTTPCORS has been configured, CORS preflight (OPTIONS)
+// requests are answered directly and simple cross-origin responses are
+// decorated with the configured Access-Control-* headers before dispatch.
 func (s *StreamableHTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.corsConfig.enabled() {
+		if s.corsConfig.handlePreflight(w, r) {
+			return
+		}
+		s.corsConfig.applySimple(w, r)
+	}
+	if s.protectedResourceMetadataHandler != nil && r.URL.Path == s.protectedResourceMetadataPath {
+		s.protectedResourceMetadataHandler.ServeHTTP(w, r)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodPost:
 		s.handlePost(w, r)
@@ -266,6 +346,9 @@ func (s *StreamableHTTPServer) Start(addr string) error {
 	if s.httpServer == nil {
 		mux := http.NewServeMux()
 		mux.Handle(s.endpointPath, s)
+		if s.protectedResourceMetadataHandler != nil && s.protectedResourceMetadataPath != s.endpointPath {
+			mux.Handle(s.protectedResourceMetadataPath, s.protectedResourceMetadataHandler)
+		}
 		s.httpServer = &http.Server{
 			Addr:    addr,
 			Handler: mux,
